@@ -85,16 +85,18 @@ class CartItemListCreateView(generics.ListCreateAPIView):
 
 class CartItemDeleteView(generics.DestroyAPIView):
     permission_classes = [IsAuthenticated]
+    lookup_field = 'pk'
 
     def get_queryset(self):
-        return CartItem.objects.filter(cart=self.request.user.cart)
+        return CartItem.objects.filter(cart__user=self.request.user)
 
-    def delete(self):
+    def delete(self, request, pk):
         user = self.request.user
         item = self.get_object()
         if not item.cart.user == user:
             return Response({'error': 'you cannot perform this action'}, status= status.HTTP_403_FORBIDDEN)
         item.delete()
+        return Response({'message': 'Item deleted successfully'})
 
 
 

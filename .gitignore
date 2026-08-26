@@ -3,3 +3,4 @@
 __pycache__
 test_out.txt
 test_err.txt
+datadump.json
