@@ -17,11 +17,15 @@ class CategorySerializer(serializers.ModelSerializer):
         fields = ['id', 'name']
 
 class ProductSerializer(serializers.ModelSerializer):
+    category = serializers.SerializerMethodField()
     image_url = serializers.SerializerMethodField()
     class Meta:
         model = Product
-        fields = ['id', 'name', 'description', 'price', 'category', 'tags', 'stock', 'status', 'is_available', 'image_url']
+        fields = ['id', 'name', 'price', 'category', 'tags', 'stock', 'status', 'is_available', 'image_url']
         extra_kwargs = {'id': {'read_only': True}}
+
+    def get_category(self, obj):
+        return obj.category.name if obj.category else None
 
     def get_image_url(self, obj):
         return obj.image.url if obj.image else None
