@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/6.0/ref/settings/
 """
 
+from corsheaders.defaults import default_headers
 from pathlib import Path
 from dotenv import load_dotenv
 from datetime import timedelta
@@ -48,6 +49,7 @@ INSTALLED_APPS = [
     'rest_framework',
     'rest_framework_simplejwt',
     'store',
+    # 'pseudopay',
     'corsheaders',
 ]
 
@@ -175,6 +177,12 @@ CORS_ALLOW_ALL_ORIGINS = True
 AUTH_USER_MODEL = 'store.User'
 
 
-PAYSTACK_SECRET_KEY = os.getenv('PAYSTACK_SECRET_KEY')
-PAYSTACK_BASE_URL = os.getenv('PAYSTACK_BASE_URL', 'https://api.paystack.co')
-PAYSTACK_CALLBACK_URL = os.getenv('PAYSTACK_CALLBACK_URL')
+PSEUDOPAY_BASE_URL = os.getenv('PSEUDOPAY_BASE_URL', 'http://127.0.0.1:8001/api')
+PSEUDOPAY_API_KEY = os.getenv('PSEUDOPAY_API_KEY', '')
+PSEUDOPAY_WALLET_ID = os.getenv('PSEUDOPAY_WALLET_ID', '')
+PSEUDOPAY_WEBHOOK_SECRET = os.getenv('PSEUDOPAY_WEBHOOK_SECRET', '')
+PSEUDOPAY_TIMEOUT = int(os.getenv('PSEUDOPAY_TIMEOUT', '30'))
+
+CORS_ALLOW_HEADERS = list(default_headers) + [
+    "Idempotency-Key"
+]

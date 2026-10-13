@@ -156,6 +156,8 @@ class Order(models.Model):
     email = models.EmailField(default='')
     amount = models.DecimalField(max_digits=10, decimal_places=2)
     reference = models.CharField(max_length=100, default='')
+    pseudopay_reference = models.CharField(max_length=100, default='', blank=True)
+    checkout_url = models.URLField(default='', blank=True, max_length=500)
     metadata = models.JSONField(default=dict)
     status = models.CharField(max_length=20, choices=ORDER_STATUS_CHOICES, default='Initiated')
     created_at = models.DateTimeField(auto_now_add=True)
@@ -165,3 +167,19 @@ class Order(models.Model):
 
     def __str__(self):
         return f"Order - {self.user.email}"
+
+
+class IdempotencyRecord(models.Model):
+    user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="user_idemppotency_record")
+    key = models.UUIDField()
+    request_hash = models.CharField(max_length=70)
+    response_status = models.PositiveSmallIntegerField()
+    response_data = models.JSONField(default=dict)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields = ["user", "key"],
+                name="unique_constraint_for_user_key"
+            )
+        ]

@@ -4,3 +4,8 @@ __pycache__
 test_out.txt
 test_err.txt
 datadump.json
+needs.txt
+ db.sqlite3
+*.pyc
+staticfiles/
+media/

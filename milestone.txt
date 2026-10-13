@@ -1,0 +1,180 @@
+DigitalLair x PseudoPay integration — milestones
+================================================
+Date: 2026-10-13. Owner: backend (this repo) + notes for digitallairfrontend.
+Goal: replace Paystack with PseudoPay (mock provider) for all transactions.
+
+READ FIRST — how PseudoPay actually works (verified from source)
+----------------------------------------------------------------
+Backend: C:\Users\EVANGEL\Desktop\Vscode\Backend\PseudoPayBackend
+- Init: POST {BASE}/api/transaction/initialize/  (Wallet/views.py:64-119)
+  Headers: X-Api-Key: sk_pseudo_...  (+ Idempotency-Key: <uuid4>, required)
+  Body: {"wallet": <id>, "amount": >=500, "transaction_type": "DEBIT",
+         "customer_email": "...", "customer_name": "...",
+         "transaction_metadata": {"order_id": ...} | null}
+  -> 201: {"transaction_reference": "TRX-...", "checkout_url":
+           "http://127.0.0.1:8000/api/checkout/TRX-.../", "transaction_status": "INITIATED", ...}
+- Pay: full-page redirect to checkout_url; customer pays with mock card;
+  POST /api/checkout/<ref>/ debits wallet, sets SUCCESSFUL.
+- Webhook (Wallet/webhooks.py): POST to wallet.request_origin (set via PUT /api/wallet/<id>/)
+  payload = {"transaction_id": int, "amount": "1000.00",
+             "status": "SUCCESSFUL", "created_at": iso}
+  NO signature, NO transaction_reference, NO metadata echo (gap — see M3).
+  Also note upstream bug: code reads wallet.profile.request_origin but field lives
+  on Wallet.request_origin (Wallet/models.py:27). Merchant must set it on the wallet.
+- Idempotency (Payments/req_hash.py + Wallet/views.py:93-108): keyed on
+  (profile, Idempotency-Key), 409 on hash mismatch, replay if Completed —
+  BUT status is never flipped to Completed, so replay is dead. We do it correctly here.
+Frontend: C:\Users\EVANGEL\Desktop\Vscode\Projects\PseudoPayFrontend
+- Merchant dashboard only. No checkout UI, no SDK hook. Canonical flow per Docs.jsx:
+  init -> window.location.href = checkout_url -> webhook + poll GET /transaction/.
+- Reusable bits: axios JWT-refresh pattern (api/axios.js), generic Modal/Button
+  (components/dashboard/ui.jsx). No PseudoPayButton to copy.
+
+What DigitalLair looked like before (this repo)
+----------------------------------------------
+- store/payments.py: PaystackClient (Bearer sk_test_..., POST /transaction/initialize
+  {email, amount(kobo), reference, callback_url, metadata{payment_id}, channels}).
+- store/services.py: InitiatePaymentView() + generate_ref() + hash_request() (unused).
+- store/views.py:111-153 OrderListCreateView creates Order(status=Initiated) then calls
+  Paystack INSIDE transaction.atomic (anti-pattern); 177-194 VerifyPayStackWebhookView
+  checks HMAC-SHA512 vs X-Paystack-Signature but reads metadata from wrong path
+  (top-level instead of data.metadata) so it 500s on real payloads.
+- store/models.py:170-183 IdempotencyRecord defined but NO migration, never read.
+- DigitalLairBackend/urls.py:30 includes pseudopay.urls but pseudopay/urls.py DOES NOT
+  EXIST -> `python manage.py check` crashes on import. Must fix in M1.
+- settings.py:180-182 PAYSTACK_* env; CORS allows Idempotency-key (lowercase, wrong case).
+
+M0 — Discovery [DONE]
+---------------------
+[x] Read PseudoPayBackend (models, views, webhooks, serializers, api.http, .env).
+[x] Read PseudoPayFrontend (Docs.jsx flow, walletapi.js, axios.js, .env).
+[x] Read DigitalLairBackend store/ (models, views, urls, payments, services, serializers, tests).
+[x] Read digitallairfrontend app/checkout/page.tsx, api/orders.js, types/order.ts.
+[x] Confirmed `manage.py check` fails (missing pseudopay.urls). Confirmed no
+    IdempotencyRecord migration exists.
+
+M1 — Rewire to PseudoPay client [DONE]
+------------------------------------------------
+Goal: no Paystack import anywhere in the order path; configurable mock provider.
+[x] Create pseudopay/urls.py (empty include fix; real routes live in store/urls.py).
+[ ] store/payments.py: replace PaystackClient with PseudoPayClient:
+    - base = settings.PSEUDOPAY_BASE_URL, header X-Api-Key, timeout 30.
+    - post(path, idempotency_key=None, **kw) injects both headers.
+    - keep module-level singleton `pseudopay`.
+[ ] DigitalLairBackend/settings.py: drop PAYSTACK_*; add
+    PSEUDOPAY_BASE_URL (default http://127.0.0.1:8001/api),
+    PSEUDOPAY_API_KEY (sk_pseudo_...), PSEUDOPAY_WALLET_ID (int),
+    PSEUDOPAY_WEBHOOK_SECRET (optional HMAC, empty = accept mock unsigned),
+    fix CORS header entry to "Idempotency-Key".
+[ ] .env: replace PAYSTACK_* example with PSEUDOPAY_* placeholders.
+[ ] store/services.py: replace InitiatePaymentView with initiate_pseudopay_payment():
+    payload -> {wallet, amount(str, >=500), transaction_type DEBIT,
+                customer_email, customer_name, transaction_metadata{order_id, reference, ...}},
+    forwards Idempotency-Key, returns {checkout_url, pseudopay_reference, raw}.
+    Keep old name as deprecated shim? No — delete + update callers/tests.
+How to verify: `python manage.py check` passes; `grep -ri paystack store/ DigitalLairBackend/`
+  returns only webhook-compat/deprecation mentions.
+DONE 2026-10-13: check passes; grep shows only 410-deprecation + compat alias.
+
+M2 — Idempotent order creation [DONE]
+--------------------------------------
+Goal: double-click / retry with same Idempotency-Key never double-charges or double-orders.
+[x] store/models.py: Order += pseudopay_reference (CharField blank),
+    checkout_url (URLField blank). (IdempotencyRecord already correct — add migration.)
+[x] makemigrations + migrate (new 0017_*.py).
+[x] store/views.py OrderListCreateView.post rewrite:
+    1. Require `Idempotency-Key: <uuid4>` header -> 400 otherwise.
+    2. hash = hash_request({metadata, email}) via services.hash_request.
+    3. get_or_create(IdempotencyRecord(user, key)) + select_for_update;
+       mismatch -> 409; hit with same hash -> replay stored {status, data} (no new order,
+       no new PseudoPay call).
+    4. Else: create Order inside atomic (snapshot cart total, set items, decrement stock,
+       detach cart) — NO external HTTP inside the atomic block.
+    5. Call PseudoPay initialize OUTSIDE atomic with same Idempotency-Key;
+       on failure mark order Failed?/delete + restore stock, return 502 (no silent Initiated).
+    6. Store pseudopay_reference + checkout_url on order; save response into record;
+       return {order_id, reference, pseudopay_reference, checkout_url,
+               authorization_url (= checkout_url, frontend compat), amount, status}.
+How to verify: POST /api/order/ twice with same key -> 1 Order row, 1 PseudoPay init
+  (mock count == 1), second response replayed; different body + same key -> 409.
+DONE 2026-10-13: covered by store/tests.py replay + conflict tests (8/8 green).
+EXTRA FIX: Cart.objects.get(user) raised MultipleObjectsReturned (signal auto-creates
+  a cart + tests seed another). Order view now picks the cart holding items.
+
+M3 — Webhook + verify (PseudoPay shape) [DONE]
+------------------------------------------------
+Gap: PseudoPay webhook has no order link (only transaction_id/amount/status).
+We accept BOTH the current 4-field shape AND the recommended extended shape.
+[x] store/views.py: new VerifyPseudoPayWebhookView (AllowAny):
+    - Optional HMAC-SHA256 check: if PSEUDOPAY_WEBHOOK_SECRET set, require
+      X-PseudoPay-Signature == hmac(secret, raw_body); else skip (mock).
+    - Parse {transaction_reference?, transaction_id?, status?, transaction_metadata?{order_id}?}.
+    - Resolve order: metadata.order_id -> pseudopay_reference -> transaction_id -> 404.
+    - Idempotent: if order.status == Paid -> 200 "already processed".
+    - If status SUCCESSFUL (+ amount matches when present) -> status Paid, 200.
+      Else return 400 (no state change). Wrap in atomic + handle DoesNotExist.
+    - Log every webhook (print/json) for now.
+[x] store/urls.py: add `pseudopay/webhook/` + `order/<pk>/verify/` (returns current
+    order status + pseudopay_reference; server-side reconcile endpoint for the
+    frontend to poll — full PseudoPay server-verify needs merchant JWT so we poll
+    our own state + rely on webhook; documented below).
+[x] Keep `paystack/webhook/` as deprecated 410 with message "use pseudopay/webhook/".
+Why no server GET to PseudoPay? GET /api/transaction/ needs merchant JWT (Bearer),
+  not API-Key, so DigitalLair (API-Key holder) cannot query it. Recommended upstream
+  fix (NOT in this repo): add GET /api/transaction/<ref>/ with API-Key auth and echo
+  {transaction_reference, transaction_metadata} in webhook + sign it.
+How to verify: POST webhook twice for same order -> Paid once, second 200 replay;
+  wrong signature -> 400; unknown ref -> 404. Manual E2E: set wallet.request_origin
+  (PUT /api/wallet/<id>/) to https://<ngrok>/api/pseudopay/webhook/, pay on checkout_url.
+DONE 2026-10-13: webhook Paid + replay + 404 + 400 + 410 covered in tests.
+NEXT (you, manual): run PseudoPayBackend, create wallet + API key, set PSEUDOPAY_*
+  in this .env, PUT wallet.request_origin to your ngrok /api/pseudopay/webhook/,
+  then checkout E2E.
+
+M4 — Tests [DONE]
+------------------
+[x] store/tests.py: repoint mock from store.services.paystack.post to
+    store.services.pseudopay.post (or responses fake); assert response contains
+    checkout_url + pseudopay_reference; assert order row has items.
+[x] New tests: idempotency replay (2 POSTs same key -> 1 order), conflict (same key
+    different body -> 409), webhook success + replay + bad signature.
+How to verify: `python manage.py test store` green.
+DONE 2026-10-13: 8/8 green on sqlite override
+  (DATABASE_URL=sqlite:///db_test_tmp.sqlite3 python manage.py test store).
+  Prod Neon DB untouched (temp file removed after run).
+
+M5 — digitallairfrontend compatibility check [DONE — read-only, patch supplied]
+---------------------------------------------------------------------------------
+Checked 2026-10-13 (no edits made in that repo):
+- app/checkout/page.tsx:161-166 BUG: first submit only mints UUID (if/else), POST runs
+  on SECOND submit. Sends flat `metadata` object as whole body (works only because
+  OrderSerializer has everything read-only except metadata? actually flat keys are
+  ignored — order gets empty metadata!) via raw axios (bypasses JWT refresh in
+  api/api.js). Redirect line 196 commented out. Copy says "Paystack".
+  REQUIRED patch (in THEIR repo):
+    1. Remove if/else so POST runs on first submit; keep paymentRef key across retries.
+    2. Body -> `{metadata}` (or use createOrder(metadata) helper which already wraps).
+    3. `const {checkout_url, authorization_url} = result; window.location.assign(checkout_url ?? authorization_url)`.
+    4. Update copy to "PseudoPay secure checkout"; add `app/payment/success/page.tsx`
+       reading ?reference= and polling GET /api/order/<id>/verify/.
+    5. Handle min-amount 500 error from PseudoPay (surface `response.data.error`).
+- api/orders.js: createOrder wraps {metadata} correctly — prefer it over raw axios.
+- types/order.ts: CreateOrderResponse must gain `checkout_url, pseudopay_reference,
+  order_id` (keep authorization_url alias).
+- Webhooks: correctly backend-only; nothing to do on frontend.
+- Idempotency: frontend already sends Idempotency-Key (paymentRef) — keep key stable
+  across retries, regenerate only for a NEW cart/order. Backend M2 now honors it.
+How to verify: checkout -> redirect to PseudoPay checkout_url -> pay -> webhook marks
+  Paid -> success page polls verify -> orders page shows Paid.
+VERDICT 2026-10-13: backend is ready; frontend needs the 5-step patch above before
+  E2E works. Idempotency header flows end-to-end (frontend key -> order record AND
+  forwarded to PseudoPay init). Webhook receiver is live at POST /api/pseudopay/webhook/.
+
+STATUS LOG (update as you go)
+------------------------------
+- 2026-10-13: M0 done. M1 started.
+- 2026-10-13: M1+M2+M3 implemented. Migration 0017 created
+  (Order.checkout_url, Order.pseudopay_reference, IdempotencyRecord table).
+  `manage.py check` passes (was crashing on missing pseudopay.urls).
+- 2026-10-13: M4 done — 8/8 tests green. Fixed MultipleObjectsReturned cart bug.
+  M5 check done (frontend patch spec'd, no edits made there).

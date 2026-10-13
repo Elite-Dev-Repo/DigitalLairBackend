@@ -17,15 +17,15 @@ class CategorySerializer(serializers.ModelSerializer):
         fields = ['id', 'name']
 
 class ProductSerializer(serializers.ModelSerializer):
-    category = serializers.SerializerMethodField()
+    # category = CategorySerializer()
     image_url = serializers.SerializerMethodField()
     class Meta:
         model = Product
         fields = ['id', 'name', 'price', 'category', 'tags', 'stock', 'status', 'is_available', 'image_url']
         extra_kwargs = {'id': {'read_only': True}}
 
-    def get_category(self, obj):
-        return obj.category.name if obj.category else None
+    # def get_category(self, obj):
+    #     return obj.category.name if obj.category else None
 
     def get_image_url(self, obj):
         return obj.image.url if obj.image else None
@@ -54,8 +54,8 @@ class OrderSerializer(serializers.ModelSerializer):
     items = CartItemSerializer(many=True, read_only=True)
     class Meta:
         model = Order
-        fields = ['id', 'user', 'items', 'amount', 'email', 'reference', 'metadata', 'status', 'created_at']
-        extra_kwargs = {'id': {'read_only': True}, 'user': {'read_only': True}, 'reference': {'read_only': True}, 'status': {'read_only': True}, 'created_at': {'read_only': True}, 'amount': {'read_only': True}, 'email': {'read_only': True}, 'items': {'read_only': True} }
+        fields = ['id', 'user', 'items', 'amount', 'email', 'reference', 'pseudopay_reference', 'checkout_url', 'metadata', 'status', 'created_at']
+        extra_kwargs = {'id': {'read_only': True}, 'user': {'read_only': True}, 'reference': {'read_only': True}, 'pseudopay_reference': {'read_only': True}, 'checkout_url': {'read_only': True}, 'status': {'read_only': True}, 'created_at': {'read_only': True}, 'amount': {'read_only': True}, 'email': {'read_only': True}, 'items': {'read_only': True} }
 
     def get_items(self, obj):
         return obj.items.all()
